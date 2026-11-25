@@ -11,7 +11,6 @@ final class XboxSession: NSObject, WKUIDelegate, WKNavigationDelegate, NSWindowD
     let webView: WKWebView
     let overlay = OverlayWindow()
     var onClose: (() -> Void)?
-    private var resizeObs: NSObjectProtocol?
 
     override init() {
         let config = WKWebViewConfiguration()
@@ -54,17 +53,8 @@ final class XboxSession: NSObject, WKUIDelegate, WKNavigationDelegate, NSWindowD
                             maxWidth: maxHeight * 16 / 9, maxHeight: maxHeight, showsCursor: false)
     }
 
-    func attachOverlay() {
-        overlay.attach(to: window)
-        resizeObs = NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: window, queue: .main) { [weak self] _ in
-            guard let self else { return }
-            self.overlay.setFrame(self.window.frame, display: true)
-        }
-    }
-    func detachOverlay() {
-        if let o = resizeObs { NotificationCenter.default.removeObserver(o); resizeObs = nil }
-        overlay.detach()
-    }
+    func attachOverlay() { overlay.attach(to: window) }
+    func detachOverlay() { overlay.detach() }
 
     // 手把 / 鍵盤模擬
     func togglePad() { webView.evaluateJavaScript("window.__vpad && (window.__vpad.on = !window.__vpad.on)") }

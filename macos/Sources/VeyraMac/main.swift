@@ -150,7 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
     @objc func setCaptureHeight(_ i: NSMenuItem) {
         captureHeight = i.tag
-        if xbox?.overlay.parent != nil { startXbox() }                  // 重新啟動擷取
+        if xbox?.overlay.isAttached == true { startXbox() }                  // 重新啟動擷取
     }
     @objc func xboxReload() { xbox?.reload() }
     @objc func xboxHome() { xbox?.home() }

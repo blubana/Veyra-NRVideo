@@ -132,12 +132,34 @@ public final class OverlayWindow: NSWindow {
         super.init(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
         isOpaque = false; backgroundColor = .clear; hasShadow = false
         ignoresMouseEvents = true; isReleasedWhenClosed = false
+        displayView.layer?.backgroundColor = nil      // 疊加層必須透明,否則會蓋住下面的視窗
         contentView = displayView
     }
+    private weak var target: NSWindow?
+    private var observers: [NSObjectProtocol] = []
+
+    /// 不使用 addChildWindow:ScreenCaptureKit 擷取單一視窗時會把子視窗一起合成進去,
+    /// 疊加層的輸出又被擷取,造成回授迴圈(畫面變成越來越強的條紋)。
+    /// 改成獨立視窗,自己同步位置、大小與層級。
     public func attach(to parent: NSWindow) {
-        setFrame(parent.frame, display: true)
-        parent.addChildWindow(self, ordered: .above)
-        orderFront(nil)
+        target = parent
+        sync()
+        let nc = NotificationCenter.default
+        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification, NSWindow.didBecomeKeyNotification,
+                     NSWindow.didChangeScreenNotification, NSWindow.didExposeNotification, NSWindow.didDeminiaturizeNotification] {
+            observers.append(nc.addObserver(forName: name, object: parent, queue: .main) { [weak self] _ in self?.sync() })
+        }
     }
-    public func detach() { parent?.removeChildWindow(self); orderOut(nil); displayView.clear() }
+
+    private func sync() {
+        guard let t = target else { return }
+        if frame != t.frame { setFrame(t.frame, display: true) }
+        order(.above, relativeTo: t.windowNumber)
+    }
+
+    public func detach() {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }; observers.removeAll()
+        target = nil; orderOut(nil); displayView.clear()
+    }
+    public var isAttached: Bool { target != nil }
 }
