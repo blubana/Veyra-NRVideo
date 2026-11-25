@@ -29,3 +29,7 @@ CMakeUserPresets.json
 startup-music.mp3
 BGM.MP3
 __pycache__/
+
+# macOS port
+macos/.build/
+macos/build/
