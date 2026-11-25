@@ -15,6 +15,7 @@ source ──► denoise ──► frame interpolation ──► super resolutio
 |---|---|
 | Local video (audio via AVPlayer) | AVFoundation `AVPlayerItemVideoOutput` |
 | Screen / window | ScreenCaptureKit (system content picker, own app excluded) |
+| **Xbox Remote Play** (web) | `WKWebView` window (Safari UA, persistent login) → ScreenCaptureKit window capture → chain → click-through overlay window. Keyboard-as-gamepad shim (`Resources/gamepad-shim.js`), real controllers keep working |
 | Camera / UVC capture card | AVFoundation `AVCaptureSession` (needs Camera permission) |
 
 ## Enhancement
@@ -30,6 +31,15 @@ Whole chain: 720p30 → 1080p60 ≈ 20 ms per source frame; 1080p30 → 4K60 (+i
 Not usable in real time on M2 (measured): `VTSuperResolutionScaler` (×4 only, 0.1–1.6 s/frame — offline export only),
 and `VTTemporalNoiseFilter` reports `isSupported == false` here (may work on newer chips).
 
+## Xbox Remote Play
+`Source → Xbox Remote Play…` (⇧⌘X) opens the web client in its own window and enhances it. Because the decoded video lives inside
+WebKit's GPU process, the window is captured with ScreenCaptureKit and the result is shown in a transparent overlay that ignores the
+mouse, so keyboard / controller / mouse input still go straight to the page. Menu **Xbox**: capture resolution
+(720p → ML super resolution to 1080p, or 1080p → Lanczos ×2), reload, home, clear login, keyboard-as-gamepad toggle (F8).
+
+macOS asks once to let the app *bypass the system window picker* — click **Allow**, otherwise other apps' windows are captured black.
+Platform passkeys (Touch ID) are not available inside `WKWebView` without an Apple-granted entitlement; sign in with password + authenticator.
+
 ## Build
 Requires macOS 26+ and Xcode Command Line Tools.
 ```bash
@@ -41,7 +51,7 @@ swift run -c release MakeTestVideo out.mp4 30 8 1280 720   # test clip with grid
 Permissions (Screen Recording / Camera) are tied to a fixed code-signing requirement, so rebuilding keeps them.
 
 ## CLI flags (for testing)
-`--open file --stats --no-sr --no-fi --force-fi --nr --dump <prefix> --screen-main --quit-after <sec>`
+`--open file --xbox --stats --no-sr --no-fi --force-fi --nr --dump <prefix> --screen-main --quit-after <sec>`
 
 ## Not ported (Windows-only or out of scope for v1)
 PS5/Xbox/Moonlight streaming, DirectShow/Magewell/Elgato vendor capture, NVIDIA/AMD NR models, RTX Video HDR,

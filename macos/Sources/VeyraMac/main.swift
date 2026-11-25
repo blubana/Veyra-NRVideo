@@ -2,6 +2,8 @@
 import Cocoa
 import AVFoundation
 import ScreenCaptureKit
+import GameController
+import IOKit.pwr_mgt
 import EnhanceKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSMenuDelegate, SCContentSharingPickerObserver {
@@ -12,6 +14,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     var lastStats = EngineStats()
     var cameraMenu = NSMenu(title: "攝影機 / 採集卡")
     var sourceName = "-"
+    var xbox: XboxSession?
+    var captureHeight = 720
+    var sleepAssertion: IOPMAssertionID = 0
 
     func applicationDidFinishLaunching(_ n: Notification) {
         engine.view = view
@@ -24,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         window.center(); window.makeKeyAndOrderFront(nil)
         setupMenu()
         NSApp.activate(ignoringOtherApps: true)
+        IOPMAssertionCreateWithName(kIOPMAssertionTypeNoDisplaySleep as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn), "Veyra streaming" as CFString, &sleepAssertion)
         handleArguments()
     }
 
@@ -39,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         if has("--force-fi") { engine.pipeline.options.forceInterpolate = true }
         if has("--nr") { engine.pipeline.options.denoise = true }
         if has("--stats") { showStats = true; view.hud.isHidden = false }
+        if has("--xbox") { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.startXbox() } }
         engine.dumpPrefix = take("--dump")
         if let f = take("--open") { open(URL(fileURLWithPath: f)) }
         if has("--screen-main") {   // 測試:不經選擇器,直接擷取主螢幕(排除本 App)
@@ -58,13 +65,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     func updateHUD(_ s: EngineStats) {
         lastStats = s
-        guard showStats else { return }
+        guard showStats, let hud = engine.view?.hud else { return }
         let i = engine.pipeline.info
-        view.hud.string = "\(i.input)→\(i.output) · 輸入 \(s.inputFPS)fps → 顯示 \(s.outputFPS)fps · 處理 \(String(format: "%.1f", s.processMs))ms · SR:\(i.superRes) · NR:\(i.denoise) · FI:\(i.interpolation)"
-        if ProcessInfo.processInfo.environment["VEYRA_DEBUG"] != nil {
-            FileHandle.standardError.write(Data(((view.hud.string as? String) ?? "" + "\n").utf8))
-            FileHandle.standardError.write(Data("\n".utf8))
-        }
+        hud.string = "\(i.input)→\(i.output) · 輸入 \(s.inputFPS)fps → 顯示 \(s.outputFPS)fps · 處理 \(String(format: "%.1f", s.processMs))ms · SR:\(i.superRes) · NR:\(i.denoise) · FI:\(i.interpolation)"
+        if ProcessInfo.processInfo.environment["VEYRA_DEBUG"] != nil, let t = hud.string as? String { log(t) }
     }
 
     // MARK: 來源
@@ -104,7 +108,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         guard let d = item.representedObject as? AVCaptureDevice else { return }
         start(CameraSource(device: d))
     }
-    @objc func stopSource() { Task { await engine.stop(); await MainActor.run { window.title = "Veyra for macOS" } } }
+    @objc func stopSource() {
+        Task {
+            await engine.stop()
+            await MainActor.run {
+                xbox?.detachOverlay(); engine.view = view
+                window.title = "Veyra for macOS"; window.makeKeyAndOrderFront(nil)
+            }
+        }
+    }
+
+    // MARK: Xbox Remote Play
+    @objc func openXbox() { startXbox() }
+    func startXbox() {
+        if xbox == nil {
+            let x = XboxSession()
+            x.onClose = { [weak self] in
+                guard let self else { return }
+                self.window.makeKeyAndOrderFront(nil)      // 先顯示主視窗,避免「最後一個視窗關閉」就結束 App
+                self.stopSource()
+            }
+            xbox = x
+        }
+        guard let x = xbox else { return }
+        x.show()
+        guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
+            let a = NSAlert(); a.messageText = "需要「螢幕錄製」權限"
+            a.informativeText = "請到 系統設定 → 隱私權與安全性 → 螢幕與系統音訊錄製 勾選 VeyraMac,然後重新開啟。\n(沒有授權時仍可登入並遊玩,只是沒有畫質增強。)"; a.runModal(); return
+        }
+        Task {
+            do {
+                try await Task.sleep(nanoseconds: 800_000_000)          // 等視窗真正出現在螢幕上
+                let src = try await x.makeSource(maxHeight: captureHeight)
+                await MainActor.run { engine.view = x.overlay.displayView; x.attachOverlay(); window.orderOut(nil) }
+                try await engine.use(src)
+                await MainActor.run { sourceName = "Xbox Remote Play" }
+            } catch {
+                await MainActor.run { let a = NSAlert(); a.messageText = "無法啟動 Xbox 增強"; a.informativeText = error.localizedDescription; a.runModal() }
+            }
+        }
+    }
+    @objc func setCaptureHeight(_ i: NSMenuItem) {
+        captureHeight = i.tag
+        if xbox?.overlay.parent != nil { startXbox() }                  // 重新啟動擷取
+    }
+    @objc func xboxReload() { xbox?.reload() }
+    @objc func xboxHome() { xbox?.home() }
+    @objc func xboxClearLogin() { xbox?.clearLogin { [weak self] in self?.xbox?.home() } }
+    @objc func padToggle() { xbox?.togglePad() }
+    @objc func padLook() { xbox?.toggleLook() }
+    @objc func padInfo() {
+        let list = GCController.controllers()
+        let a = NSAlert()
+        a.messageText = list.isEmpty ? "沒有偵測到實體手把" : "已連接 \(list.count) 支手把"
+        a.informativeText = list.map { "• \($0.vendorName ?? "Unknown") (\($0.productCategory))" }.joined(separator: "\n")
+            + "\n\n鍵盤模擬(Xbox 視窗):WASD 左搖桿、IJKL/滑鼠右搖桿、空白=A、C=B、E=X、Q=Y、Z/X=LB/RB、Shift/F=LT/RT、方向鍵=十字鍵、Tab=Back、Enter=Start、F8 開關"
+        a.runModal()
+    }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard menu === cameraMenu else { return }
@@ -122,7 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     @objc func toggleFI() { engine.pipeline.options.interpolate.toggle() }
     @objc func toggleNR() { engine.pipeline.options.denoise.toggle() }
     @objc func setNRStrength(_ i: NSMenuItem) { engine.pipeline.options.denoiseStrength = Float(i.tag) / 100 }
-    @objc func toggleStats() { showStats.toggle(); view.hud.isHidden = !showStats }
+    @objc func toggleStats() { showStats.toggle(); view.hud.isHidden = !showStats; xbox?.overlay.displayView.hud.isHidden = !showStats }
 
     // MARK: 播放
     @objc func playPause() {
@@ -143,6 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         case #selector(toggleStats): item.state = showStats ? .on : .off
         case #selector(setNRStrength(_:)): item.state = abs(o.denoiseStrength - Float(item.tag) / 100) < 0.01 ? .on : .off
         case #selector(playPause), #selector(seek(_:)): return engine.source is FileSource
+        case #selector(setCaptureHeight(_:)): item.state = item.tag == captureHeight ? .on : .off
         default: break
         }
         return true
@@ -162,11 +223,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
         add("App", [mi("隱藏 Veyra", #selector(NSApplication.hide(_:)), "h"), .separator(), mi("結束", #selector(NSApplication.terminate(_:)), "q")])
         let cam = NSMenuItem(title: "攝影機 / 採集卡", action: nil, keyEquivalent: ""); cam.submenu = cameraMenu; cameraMenu.delegate = self
-        add("來源", [mi("開啟影片…", #selector(openFile), "o"), mi("擷取螢幕 / 視窗…", #selector(pickScreen), "s", [.command, .shift]), cam, .separator(), mi("停止", #selector(stopSource), ".")])
+        add("來源", [mi("開啟影片…", #selector(openFile), "o"), mi("Xbox Remote Play…", #selector(openXbox), "x", [.command, .shift]), mi("擷取螢幕 / 視窗…", #selector(pickScreen), "s", [.command, .shift]), cam, .separator(), mi("停止", #selector(stopSource), ".")])
         let strength = NSMenuItem(title: "降噪強度", action: nil, keyEquivalent: "")
         let sm = NSMenu(); strength.submenu = sm
         for (t, v) in [("弱", 25), ("中", 50), ("強", 80)] { sm.addItem(mi(t, #selector(setNRStrength(_:)), tag: v)) }
         add("增強", [mi("超解析度", #selector(toggleSR), "1"), mi("補幀 (×2)", #selector(toggleFI), "2"), mi("降噪", #selector(toggleNR), "3"), strength, .separator(), mi("顯示統計", #selector(toggleStats), "i")])
+        let res = NSMenuItem(title: "Xbox 擷取解析度", action: nil, keyEquivalent: ""); let rm = NSMenu(); res.submenu = rm
+        rm.addItem(mi("720p(ML 超解析度 → 1080p)", #selector(setCaptureHeight(_:)), tag: 720))
+        rm.addItem(mi("1080p(Lanczos ×2 → 4K)", #selector(setCaptureHeight(_:)), tag: 1080))
+        add("Xbox", [mi("開啟 / 增強 Xbox Remote Play", #selector(openXbox)), res, .separator(),
+                     mi("重新載入", #selector(xboxReload), "r"), mi("回到 Remote Play 首頁", #selector(xboxHome), "h", [.command, .shift]), mi("清除登入資料…", #selector(xboxClearLogin)),
+                     .separator(), mi("鍵盤模擬手把 開/關 (F8)", #selector(padToggle)), mi("滑鼠視角(點一下畫面鎖定)", #selector(padLook)), mi("手把狀態與鍵位…", #selector(padInfo))])
         add("播放", [mi("播放 / 暫停", #selector(playPause), "p"), mi("倒退 5 秒", #selector(seek(_:)), String(UnicodeScalar(NSLeftArrowFunctionKey)!), [], tag: -5), mi("前進 5 秒", #selector(seek(_:)), String(UnicodeScalar(NSRightArrowFunctionKey)!), [], tag: 5)])
         add("視窗", [mi("全螢幕", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]), mi("關閉", #selector(NSWindow.performClose(_:)), "w")])
     }

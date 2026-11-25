@@ -103,7 +103,7 @@ public final class Engine: @unchecked Sendable {
                     DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.view?.present(o.buffer) }
                     lock.withLock { outCount += 1; if i == 0 && outs.count > 1 { interpCount += 1 } }
                 }
-                if let p = dumpPrefix, !dumped, total > 60 {
+                if let p = dumpPrefix, !dumped, total > Int(ProcessInfo.processInfo.environment["VEYRA_DUMP_AFTER"] ?? "") ?? 60 {
                     dumped = true
                     savePNG(f.buffer, to: p + "-input.png"); savePNG(outs.last!.buffer, to: p + "-output.png")
                 }
@@ -123,4 +123,21 @@ public final class Engine: @unchecked Sendable {
         }
         onStats?(s)
     }
+}
+
+/// 疊在另一個視窗上方、滑鼠事件穿透的透明視窗,用來顯示處理後的畫面(輸入仍由下方視窗處理)。
+public final class OverlayWindow: NSWindow {
+    public let displayView = DisplayView(frame: .zero)
+    public init() {
+        super.init(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
+        isOpaque = false; backgroundColor = .clear; hasShadow = false
+        ignoresMouseEvents = true; isReleasedWhenClosed = false
+        contentView = displayView
+    }
+    public func attach(to parent: NSWindow) {
+        setFrame(parent.frame, display: true)
+        parent.addChildWindow(self, ordered: .above)
+        orderFront(nil)
+    }
+    public func detach() { parent?.removeChildWindow(self); orderOut(nil); displayView.clear() }
 }

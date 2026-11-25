@@ -62,13 +62,13 @@ public final class ScreenSource: NSObject, FrameSource, SCStreamOutput, SCStream
     public let name = "螢幕/視窗擷取"
     public var onFrame: ((CapturedFrame) -> Void)?
     private let filter: SCContentFilter
-    private let maxWidth: Int, maxHeight: Int
+    private let maxWidth: Int, maxHeight: Int, showsCursor: Bool
     private var stream: SCStream?
     private let queue = DispatchQueue(label: "veyra.screen", qos: .userInteractive)
 
     /// 擷取尺寸會縮到 maxWidth × maxHeight 以內(預設 1280×720,讓低延遲 ML 超解析度可用)。
-    public init(filter: SCContentFilter, maxWidth: Int = 1280, maxHeight: Int = 720) {
-        self.filter = filter; self.maxWidth = maxWidth; self.maxHeight = maxHeight
+    public init(filter: SCContentFilter, maxWidth: Int = 1280, maxHeight: Int = 720, showsCursor: Bool = true) {
+        self.filter = filter; self.maxWidth = maxWidth; self.maxHeight = maxHeight; self.showsCursor = showsCursor
     }
 
     public func start() async throws {
@@ -76,12 +76,14 @@ public final class ScreenSource: NSObject, FrameSource, SCStreamOutput, SCStream
         let pxW = max(2, r.width * k), pxH = max(2, r.height * k)
         let f = min(1, CGFloat(maxWidth) / pxW, CGFloat(maxHeight) / pxH)
         let cfg = SCStreamConfiguration()
-        cfg.width = max(2, Int(pxW * f) & ~1); cfg.height = max(2, Int(pxH * f) & ~1)
+        // 對齊 16 的倍數:VideoToolbox ML 處理器對奇怪尺寸(例如 1112×720)會失敗
+        cfg.width = max(16, Int(pxW * f) & ~15); cfg.height = max(16, Int(pxH * f) & ~15)
         cfg.pixelFormat = pixelFormat420v
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         cfg.queueDepth = 5
-        cfg.showsCursor = true
+        cfg.showsCursor = showsCursor
         cfg.scalesToFit = true
+        cfg.ignoreShadowsSingleWindow = true
         let s = SCStream(filter: filter, configuration: cfg, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await s.startCapture()
